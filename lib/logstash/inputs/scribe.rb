@@ -11,7 +11,6 @@ class ScribeHandler
     @queue_lock = Mutex.new()
   end
 
-
   # Doing anything potentially time consuming inside of a Scribe Log() call can
   # lead to nasty situations where a temporary slowdown will cause repeated
   # attempts to retry the call, pushing ever more duplicate messages into
@@ -101,14 +100,33 @@ class LogStash::Inputs::Scribe < LogStash::Inputs::Base
 
   private
   def to_gelf_event(message)
-    # TODO: complete implementation of gelf -> logstash transformation
-    event = LogStash::Event.new
-    gelf = JSON.parse(message.force_encoding("UTF-8"))
+    event = nil
 
-    event.message = gelf["full_message"] || gelf["short_message"]
-    event.source_host = gelf["host"]
-    event.source_path = gelf["facility"]
-    event.source = "gelf://#{event.source_host}/#{event.source_path}"
+    begin
+      gelf = JSON.parse(message.force_encoding("UTF-8"))
+      event = LogStash::Event.new({
+        "@message" => gelf["full_message"] || gelf["short_message"],
+        "@source" => "gelf://#{gelf["host"]}/#{gelf["facility"]}",
+        "@timestamp" => Time.at(gelf["timestamp"]).iso8061,
+        "@fields" => {
+          "log_level" => gelf["level"]
+        },
+        "@tags" => ["gelf"]
+      })
+
+      # Copy over extra fields
+      gelf.keys.select {|key| key.start_with?("_") }.each do |key|
+        event.fields[key[1..-1]] = gelf[key]
+      end
+    rescue => e
+      @logger.warn("Error parsing gelf message, falling back to plain text",
+                   :input => message, :source => source, :exception => e,
+                   :backtrace => e.backtrace)
+      event = LogStash::Event.new({
+        "@message" => message,
+        "@tags" => ["_gelfparsefailure"]
+      })
+    end
 
     return event
   end
